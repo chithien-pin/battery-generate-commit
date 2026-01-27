@@ -25,15 +25,35 @@ Công cụ CLI Node.js sẵn sàng cho production, tạo commit message theo chu
 npm install
 ```
 
-### Liên Kết CLI Tool
+### Cài Đặt Toàn Cục (Global Installation)
 
-Để phát triển và test local:
+Có 2 cách để sử dụng `batt` toàn cục:
+
+#### Cách 1: npm link (Cho Development)
+
+Để phát triển và test local, sử dụng `npm link`:
 
 ```bash
 npm link
 ```
 
-Lệnh này sẽ làm cho lệnh `batt` có sẵn toàn cục trên hệ thống của bạn.
+Lệnh này sẽ tạo symbolic link, làm cho lệnh `batt` có sẵn toàn cục trên hệ thống của bạn.
+
+#### Cách 2: npm install -g (Cho Production)
+
+Để cài đặt vĩnh viễn từ thư mục hiện tại:
+
+```bash
+npm install -g .
+```
+
+Hoặc nếu bạn đã publish package lên npm:
+
+```bash
+npm install -g batt
+```
+
+**Lưu ý**: Sau khi cài đặt, bạn có thể chạy `batt -gen commit` từ bất kỳ thư mục nào trong terminal.
 
 ### Thiết Lập API Key
 
