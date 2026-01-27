@@ -15,8 +15,11 @@ const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 
 // Rough estimate: ~4 characters per token (conservative estimate)
 const CHARS_PER_TOKEN = 4;
-// Maximum tokens for the diff (leaving room for prompt and response)
-const MAX_DIFF_TOKENS = 4000;
+// Maximum tokens for the entire request (Groq on-demand tier: 6000 TPM)
+// Reserve ~500 tokens for prompt template and ~100 for response
+const MAX_TOTAL_TOKENS = 5400;
+// Maximum tokens for the diff content only
+const MAX_DIFF_TOKENS = 3000;
 
 /**
  * Load the commit prompt template
@@ -48,16 +51,16 @@ function truncateDiff(diff) {
     return diff;
   }
   
-  // Calculate max characters to keep (leave room for prompt template)
+  // Calculate max characters to keep (conservative estimate)
   const maxChars = MAX_DIFF_TOKENS * CHARS_PER_TOKEN;
   
   // Try to truncate at a file boundary
   const lines = diff.split('\n');
   let truncated = [];
   let currentLength = 0;
-  let foundFileBoundary = false;
+  let lastFileBoundaryIndex = -1;
   
-  // Look for file boundaries (diff --git, ---, +++)
+  // First pass: find file boundaries and track positions
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineLength = line.length + 1; // +1 for newline
@@ -66,12 +69,20 @@ function truncateDiff(diff) {
     const isFileBoundary = line.startsWith('diff --git') || 
                           (line.startsWith('---') && i > 0 && !lines[i-1].startsWith('---'));
     
-    if (isFileBoundary && currentLength > maxChars * 0.8) {
-      // We've used 80% of our budget, stop at this file boundary
-      truncated.push('\n... (diff truncated - showing first ~' + 
-                     Math.floor(currentLength / CHARS_PER_TOKEN) + ' tokens)');
-      foundFileBoundary = true;
-      break;
+    if (isFileBoundary) {
+      lastFileBoundaryIndex = i;
+    }
+    
+    // Stop early if we're approaching the limit
+    if (currentLength + lineLength > maxChars * 0.9) {
+      // Try to stop at the last file boundary if we're close
+      if (lastFileBoundaryIndex >= 0 && currentLength > maxChars * 0.7) {
+        // Truncate at last file boundary
+        truncated.push('\n... (diff truncated - showing first ~' + 
+                       Math.floor(currentLength / CHARS_PER_TOKEN) + ' tokens from ' +
+                       Math.floor(estimatedTokens / 1000) + 'k total)');
+        break;
+      }
     }
     
     if (currentLength + lineLength <= maxChars) {
@@ -80,7 +91,8 @@ function truncateDiff(diff) {
     } else {
       // Can't fit this line, truncate here
       truncated.push('\n... (diff truncated - showing first ~' + 
-                     Math.floor(currentLength / CHARS_PER_TOKEN) + ' tokens)');
+                     Math.floor(currentLength / CHARS_PER_TOKEN) + ' tokens from ' +
+                     Math.floor(estimatedTokens / 1000) + 'k total)');
       break;
     }
   }
@@ -96,7 +108,39 @@ function truncateDiff(diff) {
 function buildPrompt(diff) {
   const template = loadPromptTemplate();
   const truncatedDiff = truncateDiff(diff);
-  return template.replace('{{DIFF}}', truncatedDiff);
+  const prompt = template.replace('{{DIFF}}', truncatedDiff);
+  
+  // Double-check total token count and truncate more aggressively if needed
+  const totalTokens = estimateTokens(prompt);
+  if (totalTokens > MAX_TOTAL_TOKENS) {
+    // Calculate how much space we have for the diff
+    const templateTokens = estimateTokens(template.replace('{{DIFF}}', ''));
+    const reservedTokens = 100; // Reserve for response
+    const availableDiffTokens = MAX_TOTAL_TOKENS - templateTokens - reservedTokens;
+    
+    // Ensure we don't exceed the available tokens
+    const maxDiffChars = Math.floor(availableDiffTokens * CHARS_PER_TOKEN * 0.95); // 95% to be safe
+    
+    // Truncate more aggressively
+    const lines = truncatedDiff.split('\n');
+    let finalDiff = [];
+    let currentLength = 0;
+    
+    for (const line of lines) {
+      const lineLength = line.length + 1;
+      if (currentLength + lineLength <= maxDiffChars) {
+        finalDiff.push(line);
+        currentLength += lineLength;
+      } else {
+        finalDiff.push('\n... (further truncated to fit API limits)');
+        break;
+      }
+    }
+    
+    return template.replace('{{DIFF}}', finalDiff.join('\n'));
+  }
+  
+  return prompt;
 }
 
 /**
@@ -157,10 +201,16 @@ async function generateCommitMessageWithGroq(diff, config) {
   // Check if diff is too large and warn
   const estimatedTokens = estimateTokens(diff);
   if (estimatedTokens > MAX_DIFF_TOKENS) {
-    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to fit API limits...`);
+    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to ~${MAX_DIFF_TOKENS} tokens to fit API limits...`);
   }
   
   const prompt = buildPrompt(diff);
+  
+  // Final check on total prompt size
+  const totalPromptTokens = estimateTokens(prompt);
+  if (totalPromptTokens > MAX_TOTAL_TOKENS) {
+    console.warn(`⚠️  Warning: Total prompt size (${totalPromptTokens} tokens) may exceed API limits. Further truncation applied.`);
+  }
   
   // Set up timeout (30 seconds)
   const controller = new AbortController();
@@ -255,10 +305,16 @@ async function generateCommitMessageWithGemini(diff, config) {
   // Check if diff is too large and warn
   const estimatedTokens = estimateTokens(diff);
   if (estimatedTokens > MAX_DIFF_TOKENS) {
-    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to fit API limits...`);
+    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to ~${MAX_DIFF_TOKENS} tokens to fit API limits...`);
   }
   
   const prompt = buildPrompt(diff);
+  
+  // Final check on total prompt size
+  const totalPromptTokens = estimateTokens(prompt);
+  if (totalPromptTokens > MAX_TOTAL_TOKENS) {
+    console.warn(`⚠️  Warning: Total prompt size (${totalPromptTokens} tokens) may exceed API limits. Further truncation applied.`);
+  }
   
   // Set up timeout (30 seconds)
   const controller = new AbortController();
