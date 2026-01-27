@@ -1,0 +1,27 @@
+{
+  "name": "batt",
+  "version": "1.0.0",
+  "description": "AI-powered git commit message generator",
+  "type": "module",
+  "main": "bin/batt.js",
+  "bin": {
+    "batt": "./bin/batt.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "git",
+    "commit",
+    "ai",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "commander": "^11.1.0"
+  }
+}
