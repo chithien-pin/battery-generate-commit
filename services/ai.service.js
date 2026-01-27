@@ -5,8 +5,18 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Groq API constants
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama3-8b-8192';
+const GROQ_MODEL = 'llama-3.1-8b-instant';
+
+// Gemini API constants
+const GEMINI_MODEL = 'gemini-3-flash-preview';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+// Rough estimate: ~4 characters per token (conservative estimate)
+const CHARS_PER_TOKEN = 4;
+// Maximum tokens for the diff (leaving room for prompt and response)
+const MAX_DIFF_TOKENS = 4000;
 
 /**
  * Load the commit prompt template
@@ -18,13 +28,75 @@ function loadPromptTemplate() {
 }
 
 /**
+ * Estimate token count from text
+ * @param {string} text - Text to estimate
+ * @returns {number} Estimated token count
+ */
+function estimateTokens(text) {
+  return Math.ceil(text.length / CHARS_PER_TOKEN);
+}
+
+/**
+ * Truncate diff intelligently to fit within token limits
+ * @param {string} diff - Full diff content
+ * @returns {string} Truncated diff
+ */
+function truncateDiff(diff) {
+  const estimatedTokens = estimateTokens(diff);
+  
+  if (estimatedTokens <= MAX_DIFF_TOKENS) {
+    return diff;
+  }
+  
+  // Calculate max characters to keep (leave room for prompt template)
+  const maxChars = MAX_DIFF_TOKENS * CHARS_PER_TOKEN;
+  
+  // Try to truncate at a file boundary
+  const lines = diff.split('\n');
+  let truncated = [];
+  let currentLength = 0;
+  let foundFileBoundary = false;
+  
+  // Look for file boundaries (diff --git, ---, +++)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineLength = line.length + 1; // +1 for newline
+    
+    // Check if this is a file boundary
+    const isFileBoundary = line.startsWith('diff --git') || 
+                          (line.startsWith('---') && i > 0 && !lines[i-1].startsWith('---'));
+    
+    if (isFileBoundary && currentLength > maxChars * 0.8) {
+      // We've used 80% of our budget, stop at this file boundary
+      truncated.push('\n... (diff truncated - showing first ~' + 
+                     Math.floor(currentLength / CHARS_PER_TOKEN) + ' tokens)');
+      foundFileBoundary = true;
+      break;
+    }
+    
+    if (currentLength + lineLength <= maxChars) {
+      truncated.push(line);
+      currentLength += lineLength;
+    } else {
+      // Can't fit this line, truncate here
+      truncated.push('\n... (diff truncated - showing first ~' + 
+                     Math.floor(currentLength / CHARS_PER_TOKEN) + ' tokens)');
+      break;
+    }
+  }
+  
+  return truncated.join('\n');
+}
+
+/**
  * Build the prompt with the diff
  * @param {string} diff - Git diff content
  * @returns {string} Formatted prompt
  */
 function buildPrompt(diff) {
   const template = loadPromptTemplate();
-  return template.replace('{{DIFF}}', diff);
+  const truncatedDiff = truncateDiff(diff);
+  return template.replace('{{DIFF}}', truncatedDiff);
 }
 
 /**
@@ -72,7 +144,7 @@ function validateCommitMessage(message, config) {
  * @param {Object} config - Configuration object
  * @returns {Promise<string>} Generated commit message
  */
-export async function generateCommitMessage(diff, config) {
+async function generateCommitMessageWithGroq(diff, config) {
   const apiKey = process.env.BATT_GROQ_API_KEY;
   
   if (!apiKey) {
@@ -80,6 +152,12 @@ export async function generateCommitMessage(diff, config) {
       'BATT_GROQ_API_KEY environment variable is not set. ' +
       'Please set it with: export BATT_GROQ_API_KEY=your_api_key'
     );
+  }
+  
+  // Check if diff is too large and warn
+  const estimatedTokens = estimateTokens(diff);
+  if (estimatedTokens > MAX_DIFF_TOKENS) {
+    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to fit API limits...`);
   }
   
   const prompt = buildPrompt(diff);
@@ -113,9 +191,20 @@ export async function generateCommitMessage(diff, config) {
     
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
+      const errorMessage = errorData.error?.message || 'Unknown error';
+      
+      // Handle 413 Payload Too Large specifically
+      if (response.status === 413) {
+        throw new Error(
+          `Diff is too large for the API. The diff contains approximately ${estimateTokens(diff)} tokens, ` +
+          `which exceeds the API limit. Consider committing smaller changes or splitting into multiple commits. ` +
+          `Original error: ${errorMessage}`
+        );
+      }
+      
       throw new Error(
         `Groq API error: ${response.status} ${response.statusText}. ` +
-        `${errorData.error?.message || 'Unknown error'}`
+        `${errorMessage}`
       );
     }
     
@@ -144,5 +233,128 @@ export async function generateCommitMessage(diff, config) {
       throw new Error('Network error: Failed to connect to Groq API. Check your internet connection.');
     }
     throw error;
+  }
+}
+
+/**
+ * Generate commit message using Gemini API
+ * @param {string} diff - Git diff content
+ * @param {Object} config - Configuration object
+ * @returns {Promise<string>} Generated commit message
+ */
+async function generateCommitMessageWithGemini(diff, config) {
+  const apiKey = process.env.BATT_GEMINI_API_KEY;
+  
+  if (!apiKey) {
+    throw new Error(
+      'BATT_GEMINI_API_KEY environment variable is not set. ' +
+      'Please set it with: export BATT_GEMINI_API_KEY=your_api_key'
+    );
+  }
+  
+  // Check if diff is too large and warn
+  const estimatedTokens = estimateTokens(diff);
+  if (estimatedTokens > MAX_DIFF_TOKENS) {
+    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to fit API limits...`);
+  }
+  
+  const prompt = buildPrompt(diff);
+  
+  // Set up timeout (30 seconds)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  
+  try {
+    const url = `${GEMINI_API_URL}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 100
+        }
+      }),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const errorMessage = errorData.error?.message || 'Unknown error';
+      
+      // Handle 413 Payload Too Large specifically
+      if (response.status === 413) {
+        throw new Error(
+          `Diff is too large for the API. The diff contains approximately ${estimateTokens(diff)} tokens, ` +
+          `which exceeds the API limit. Consider committing smaller changes or splitting into multiple commits. ` +
+          `Original error: ${errorMessage}`
+        );
+      }
+      
+      throw new Error(
+        `Gemini API error: ${response.status} ${response.statusText}. ` +
+        `${errorMessage}`
+      );
+    }
+    
+    const data = await response.json();
+    const rawMessage = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    
+    if (!rawMessage) {
+      throw new Error('No response from AI model');
+    }
+    
+    const validatedMessage = validateCommitMessage(rawMessage, config);
+    
+    if (!validatedMessage) {
+      throw new Error('AI generated invalid commit message');
+    }
+    
+    return validatedMessage;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout: Gemini API did not respond within 30 seconds.');
+    }
+    
+    if (error instanceof TypeError && error.message.includes('fetch')) {
+      throw new Error('Network error: Failed to connect to Gemini API. Check your internet connection.');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Generate commit message using the configured AI provider
+ * @param {string} diff - Git diff content
+ * @param {Object} config - Configuration object
+ * @returns {Promise<string>} Generated commit message
+ */
+export async function generateCommitMessage(diff, config) {
+  const provider = config.aiProvider?.toLowerCase() || 'groq';
+  
+  switch (provider) {
+    case 'groq':
+      return await generateCommitMessageWithGroq(diff, config);
+    case 'gemini':
+      return await generateCommitMessageWithGemini(diff, config);
+    default:
+      throw new Error(
+        `Unsupported AI provider: ${provider}. Supported providers are: groq, gemini`
+      );
   }
 }

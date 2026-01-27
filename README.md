@@ -4,11 +4,11 @@ Công cụ CLI Node.js sẵn sàng cho production, tạo commit message theo chu
 
 ## Tính Năng
 
-- 🤖 **Hỗ trợ AI**: Sử dụng mô hình Llama 3 của Groq để tạo commit message thông minh
+- 🤖 **Hỗ trợ AI**: Hỗ trợ nhiều nhà cung cấp AI (Groq với Llama 3, Google Gemini) để tạo commit message thông minh
 - 📝 **Conventional Commits**: Tự động định dạng message theo chuẩn Conventional Commits
-- ⚙️ **Có thể cấu hình**: Cấu hình theo từng dự án qua file `.batt/config.json`
+- ⚙️ **Có thể cấu hình**: Cấu hình theo từng dự án qua file `.batt/config.json`, bao gồm chọn nhà cung cấp AI
 - 🔒 **An toàn**: Luôn hỏi xác nhận trước khi commit
-- 🚀 **Nhanh**: Thời gian phản hồi nhanh với Groq API
+- 🚀 **Nhanh**: Thời gian phản hồi nhanh với các API hiện đại
 - 🌍 **Đa nền tảng**: Hoạt động trên macOS, Linux và Windows
 
 ## Cài Đặt
@@ -37,7 +37,9 @@ Lệnh này sẽ làm cho lệnh `batt` có sẵn toàn cục trên hệ thống
 
 ### Thiết Lập API Key
 
-Đặt Groq API key của bạn làm biến môi trường:
+Batt hỗ trợ hai nhà cung cấp AI: **Groq** (mặc định) và **Gemini**. Bạn cần thiết lập API key cho nhà cung cấp bạn muốn sử dụng.
+
+#### Groq API Key (Mặc định)
 
 ```bash
 # macOS/Linux
@@ -50,12 +52,32 @@ $env:BATT_GROQ_API_KEY="your_groq_api_key_here"
 set BATT_GROQ_API_KEY=your_groq_api_key_here
 ```
 
+#### Gemini API Key
+
+```bash
+# macOS/Linux
+export BATT_GEMINI_API_KEY=your_gemini_api_key_here
+
+# Windows (PowerShell)
+$env:BATT_GEMINI_API_KEY="your_gemini_api_key_here"
+
+# Windows (CMD)
+set BATT_GEMINI_API_KEY=your_gemini_api_key_here
+```
+
 Để làm cho nó vĩnh viễn, thêm vào shell profile của bạn (`~/.zshrc`, `~/.bashrc`, v.v.):
 
 ```bash
+# Cho Groq
 echo 'export BATT_GROQ_API_KEY=your_groq_api_key_here' >> ~/.zshrc
+
+# Hoặc cho Gemini
+echo 'export BATT_GEMINI_API_KEY=your_gemini_api_key_here' >> ~/.zshrc
+
 source ~/.zshrc
 ```
+
+**Lưu ý**: Bạn chỉ cần thiết lập API key cho nhà cung cấp bạn muốn sử dụng. Xem phần [Cấu Hình](#cấu-hình) để chọn nhà cung cấp.
 
 ## Cách Sử Dụng
 
@@ -123,13 +145,32 @@ Tạo file `.batt/config.json` trong thư mục gốc của dự án để tùy 
 
 | Tùy chọn | Kiểu | Mặc định | Mô tả |
 |----------|------|----------|-------|
-| `aiProvider` | string | `"groq"` | Nhà cung cấp AI để sử dụng (hiện tại chỉ hỗ trợ `groq`) |
+| `aiProvider` | string | `"groq"` | Nhà cung cấp AI để sử dụng (`groq` hoặc `gemini`) |
 | `maxTitleLength` | number | `72` | Độ dài tối đa của tiêu đề commit message |
 | `confirmBeforeCommit` | boolean | `true` | Có hỏi xác nhận trước khi commit hay không |
 | `allowedTypes` | string[] | `["feat","fix","refactor","chore","test"]` | Các loại Conventional Commit được phép |
 
 ### Ví Dụ Cấu Hình
 
+**Sử dụng Groq (mặc định):**
+```json
+{
+  "aiProvider": "groq",
+  "maxTitleLength": 72,
+  "confirmBeforeCommit": true
+}
+```
+
+**Sử dụng Gemini:**
+```json
+{
+  "aiProvider": "gemini",
+  "maxTitleLength": 72,
+  "confirmBeforeCommit": true
+}
+```
+
+**Tùy chỉnh khác:**
 ```json
 {
   "maxTitleLength": 50,
@@ -178,10 +219,18 @@ Nếu bạn chạy `batt -gen commit` mà không có thay đổi nào được s
 
 ### Thiếu API Key
 
-Nếu `BATT_GROQ_API_KEY` chưa được thiết lập:
+Nếu API key chưa được thiết lập cho nhà cung cấp đã chọn:
 
+**Cho Groq:**
 ```
 ❌ Failed to generate commit message: BATT_GROQ_API_KEY environment variable is not set. Please set it with: export BATT_GROQ_API_KEY=your_api_key
+⚠️  You can write your commit message manually.
+ℹ️  Run: git commit
+```
+
+**Cho Gemini:**
+```
+❌ Failed to generate commit message: BATT_GEMINI_API_KEY environment variable is not set. Please set it with: export BATT_GEMINI_API_KEY=your_api_key
 ⚠️  You can write your commit message manually.
 ℹ️  Run: git commit
 ```
@@ -280,4 +329,4 @@ MIT
 
 ---
 
-**Lưu ý**: Công cụ này yêu cầu Groq API key. Đảm bảo giữ API key của bạn an toàn và không bao giờ commit nó vào version control.
+**Lưu ý**: Công cụ này yêu cầu API key từ Groq hoặc Google Gemini (tùy thuộc vào nhà cung cấp bạn chọn). Đảm bảo giữ API key của bạn an toàn và không bao giờ commit nó vào version control.
