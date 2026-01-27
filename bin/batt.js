@@ -2,6 +2,7 @@
 
 import { program } from 'commander';
 import { genCommit } from '../commands/genCommit.js';
+import { setup } from '../commands/setup.js';
 
 // Handle -gen commit syntax (before commander parses)
 const args = process.argv.slice(2);
@@ -33,6 +34,13 @@ if (args[0] === '-gen' && args[1] === 'commit') {
         console.error(`Unknown generation type: ${type}`);
         process.exit(1);
       }
+    });
+
+  program
+    .command('setup')
+    .description('Setup API keys interactively')
+    .action(async () => {
+      await setup();
     });
 
   program.parse();

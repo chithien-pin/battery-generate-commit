@@ -1,5 +1,5 @@
 {
-  "name": "batt",
+  "name": "battery-generate-commit",
   "version": "1.0.0",
   "description": "AI-powered git commit message generator",
   "type": "module",
@@ -8,19 +8,40 @@
     "batt": "./bin/batt.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "git",
     "commit",
     "ai",
-    "cli"
+    "cli",
+    "conventional-commits",
+    "groq",
+    "gemini",
+    "commit-message"
   ],
   "author": "",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chithien-pin/battery-generate-commit"
+  },
+  "bugs": {
+    "url": "https://github.com/chithien-pin/battery-generate-commit/issues"
+  },
+  "homepage": "https://github.com/chithien-pin/battery-generate-commit#readme",
+  "files": [
+    "bin",
+    "commands",
+    "services",
+    "prompts",
+    "utils",
+    "README.md"
+  ],
   "dependencies": {
     "commander": "^11.1.0"
   }

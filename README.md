@@ -2,6 +2,20 @@
 
 Công cụ CLI Node.js sẵn sàng cho production, tạo commit message theo chuẩn Conventional Commits bằng AI. Batt phân tích các thay đổi git đã được stage và đề xuất commit message tuân theo đặc tả Conventional Commits.
 
+## 🚀 Quick Start
+
+```bash
+# Cài đặt
+npm install -g battery-generate-commit
+
+# Thiết lập API key
+batt setup
+
+# Sử dụng
+git add .
+batt -gen commit
+```
+
 ## Tính Năng
 
 - 🤖 **Hỗ trợ AI**: Hỗ trợ nhiều nhà cung cấp AI (Groq với Llama 3, Google Gemini) để tạo commit message thông minh
@@ -17,7 +31,9 @@ Công cụ CLI Node.js sẵn sàng cho production, tạo commit message theo chu
 
 - Node.js 18.0.0 trở lên
 - Git đã được cài đặt và cấu hình
-- Groq API key ([Lấy tại đây](https://console.groq.com/))
+- API key từ một trong các nhà cung cấp:
+  - Groq API key ([Lấy tại đây](https://console.groq.com/)) - Khuyên dùng
+  - Google Gemini API key ([Lấy tại đây](https://makersuite.google.com/app/apikey))
 
 ### Cài Đặt Dependencies
 
@@ -39,21 +55,45 @@ npm link
 
 Lệnh này sẽ tạo symbolic link, làm cho lệnh `batt` có sẵn toàn cục trên hệ thống của bạn.
 
-#### Cách 2: npm install -g (Cho Production)
+#### Cách 2: Cài đặt từ npm (Khuyên dùng)
 
-Để cài đặt vĩnh viễn từ thư mục hiện tại:
+Nếu package đã được publish lên npm registry:
+
+```bash
+npm install -g battery-generate-commit
+```
+
+Sau khi cài đặt, bạn có thể sử dụng lệnh `batt`:
+
+```bash
+batt -gen commit
+```
+
+Hoặc cài đặt từ thư mục local:
 
 ```bash
 npm install -g .
 ```
 
-Hoặc nếu bạn đã publish package lên npm:
+**Lưu ý**: 
+- Package name trên npm: `battery-generate-commit`
+- Lệnh CLI sau khi cài đặt: `batt`
+- Sau khi cài đặt, bạn có thể chạy `batt -gen commit` từ bất kỳ thư mục nào trong terminal.
+
+### Thiết Lập API Key Sau Khi Cài Đặt
+
+Sau khi cài đặt, chạy lệnh setup để nhập API key:
 
 ```bash
-npm install -g batt
+batt setup
 ```
 
-**Lưu ý**: Sau khi cài đặt, bạn có thể chạy `batt -gen commit` từ bất kỳ thư mục nào trong terminal.
+Lệnh này sẽ hướng dẫn bạn:
+1. Chọn nhà cung cấp AI (Groq hoặc Gemini)
+2. Nhập API key
+3. Tự động thêm vào shell profile của bạn
+
+Hoặc bạn có thể thiết lập thủ công như mô tả ở phần [Thiết Lập API Key](#thiết-lập-api-key).
 
 ### Thiết Lập API Key
 
@@ -270,20 +310,22 @@ Công cụ sẽ thoát một cách an toàn, cho phép bạn viết commit messa
 ## Cấu Trúc Dự Án
 
 ```
-batt/
+battery-generate-commit/
 ├── bin/
 │   └── batt.js              # Điểm vào CLI
 ├── commands/
-│   └── genCommit.js         # Logic tạo commit chính
+│   ├── genCommit.js         # Logic tạo commit chính
+│   └── setup.js             # Thiết lập API key
 ├── services/
 │   ├── git.service.js       # Các thao tác Git
-│   ├── ai.service.js        # Tích hợp Groq API
+│   ├── ai.service.js        # Tích hợp AI providers (Groq & Gemini)
 │   └── config.service.js    # Trình tải cấu hình
 ├── prompts/
 │   └── commit.prompt.txt    # Template prompt AI
 ├── utils/
 │   └── logger.js            # Tiện ích logging
-└── package.json
+├── package.json
+└── README.md
 ```
 
 ## Khắc Phục Sự Cố
@@ -332,9 +374,38 @@ Nếu bạn thường xuyên gặp timeout:
 npm test
 ```
 
+### Publish Lên NPM
+
+Để publish package lên npm registry:
+
+1. **Đăng nhập npm:**
+   ```bash
+   npm login
+   ```
+
+2. **Kiểm tra package name:**
+   ```bash
+   npm search battery-generate-commit
+   ```
+
+3. **Publish:**
+   ```bash
+   npm publish
+   ```
+
+4. **Sau khi publish, người dùng có thể cài đặt:**
+   ```bash
+   npm install -g battery-generate-commit
+   ```
+
+5. **Setup API key:**
+   ```bash
+   batt setup
+   ```
+
 ### Đóng Góp
 
-1. Fork repository
+1. Fork repository: [https://github.com/chithien-pin/battery-generate-commit](https://github.com/chithien-pin/battery-generate-commit)
 2. Tạo feature branch
 3. Thực hiện thay đổi
 4. Gửi pull request
@@ -344,6 +415,9 @@ npm test
 MIT
 
 ## Hỗ Trợ
+
+- **Repository**: [https://github.com/chithien-pin/battery-generate-commit](https://github.com/chithien-pin/battery-generate-commit)
+- **Issues**: [https://github.com/chithien-pin/battery-generate-commit/issues](https://github.com/chithien-pin/battery-generate-commit/issues)
 
 Đối với các vấn đề, câu hỏi hoặc đóng góp, vui lòng mở issue trên repository của dự án.
 
