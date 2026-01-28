@@ -18,7 +18,7 @@ batt -gen commit
 
 ## Tính Năng
 
-- 🤖 **Hỗ trợ AI**: Hỗ trợ nhiều nhà cung cấp AI (Groq với Llama 3, Google Gemini) để tạo commit message thông minh
+- 🤖 **Hỗ trợ AI**: Hỗ trợ nhiều nhà cung cấp AI (Groq, Google Gemini, OpenAI ChatGPT, Anthropic Claude) để tạo commit message thông minh
 - 📝 **Conventional Commits**: Tự động định dạng message theo chuẩn Conventional Commits
 - ⚙️ **Có thể cấu hình**: Cấu hình theo từng dự án qua file `.batt/config.json`, bao gồm chọn nhà cung cấp AI
 - 🔒 **An toàn**: Luôn hỏi xác nhận trước khi commit
@@ -32,8 +32,10 @@ batt -gen commit
 - Node.js 18.0.0 trở lên
 - Git đã được cài đặt và cấu hình
 - API key từ một trong các nhà cung cấp:
-  - Groq API key ([Lấy tại đây](https://console.groq.com/)) - Khuyên dùng
-  - Google Gemini API key ([Lấy tại đây](https://makersuite.google.com/app/apikey))
+  - **Groq** API key ([Lấy tại đây](https://console.groq.com/)) - Khuyên dùng (miễn phí, nhanh)
+  - **Google Gemini** API key ([Lấy tại đây](https://makersuite.google.com/app/apikey))
+  - **OpenAI (ChatGPT)** API key ([Lấy tại đây](https://platform.openai.com/api-keys))
+  - **Anthropic (Claude)** API key ([Lấy tại đây](https://console.anthropic.com/))
 
 ### Cài Đặt Dependencies
 
@@ -89,7 +91,7 @@ batt setup
 ```
 
 Lệnh này sẽ hướng dẫn bạn:
-1. Chọn nhà cung cấp AI (Groq hoặc Gemini)
+1. Chọn nhà cung cấp AI (Groq, Gemini, OpenAI, Claude, hoặc Tất cả)
 2. Nhập API key
 3. Tự động thêm vào shell profile của bạn
 
@@ -97,7 +99,7 @@ Hoặc bạn có thể thiết lập thủ công như mô tả ở phần [Thi�
 
 ### Thiết Lập API Key
 
-Batt hỗ trợ hai nhà cung cấp AI: **Groq** (mặc định) và **Gemini**. Bạn cần thiết lập API key cho nhà cung cấp bạn muốn sử dụng.
+Batt hỗ trợ nhiều nhà cung cấp AI: **Groq** (mặc định), **Gemini**, **OpenAI (ChatGPT)**, và **Claude (Anthropic)**. Bạn cần thiết lập API key cho nhà cung cấp bạn muốn sử dụng.
 
 #### Groq API Key (Mặc định)
 
@@ -134,10 +136,53 @@ echo 'export BATT_GROQ_API_KEY=your_groq_api_key_here' >> ~/.zshrc
 # Hoặc cho Gemini
 echo 'export BATT_GEMINI_API_KEY=your_gemini_api_key_here' >> ~/.zshrc
 
+# Hoặc cho OpenAI
+echo 'export BATT_OPENAI_API_KEY=your_openai_api_key_here' >> ~/.zshrc
+
+# Hoặc cho Claude
+echo 'export BATT_ANTHROPIC_API_KEY=your_anthropic_api_key_here' >> ~/.zshrc
+
 source ~/.zshrc
 ```
 
-**Lưu ý**: Bạn chỉ cần thiết lập API key cho nhà cung cấp bạn muốn sử dụng. Xem phần [Cấu Hình](#cấu-hình) để chọn nhà cung cấp.
+#### OpenAI (ChatGPT) API Key
+
+```bash
+# macOS/Linux
+export BATT_OPENAI_API_KEY=your_openai_api_key_here
+# Hoặc sử dụng biến môi trường chuẩn
+export OPENAI_API_KEY=your_openai_api_key_here
+
+# Windows (PowerShell)
+$env:BATT_OPENAI_API_KEY="your_openai_api_key_here"
+
+# Windows (CMD)
+set BATT_OPENAI_API_KEY=your_openai_api_key_here
+```
+
+**Lấy API key tại**: [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+
+#### Claude (Anthropic) API Key
+
+```bash
+# macOS/Linux
+export BATT_ANTHROPIC_API_KEY=your_anthropic_api_key_here
+# Hoặc sử dụng biến môi trường chuẩn
+export ANTHROPIC_API_KEY=your_anthropic_api_key_here
+
+# Windows (PowerShell)
+$env:BATT_ANTHROPIC_API_KEY="your_anthropic_api_key_here"
+
+# Windows (CMD)
+set BATT_ANTHROPIC_API_KEY=your_anthropic_api_key_here
+```
+
+**Lấy API key tại**: [https://console.anthropic.com/](https://console.anthropic.com/)
+
+**Lưu ý**: 
+- Bạn chỉ cần thiết lập API key cho nhà cung cấp bạn muốn sử dụng
+- OpenAI và Claude cũng hỗ trợ biến môi trường chuẩn (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`)
+- Xem phần [Cấu Hình](#cấu-hình) để chọn nhà cung cấp
 
 ## Cách Sử Dụng
 
@@ -205,7 +250,7 @@ Tạo file `.batt/config.json` trong thư mục gốc của dự án để tùy 
 
 | Tùy chọn | Kiểu | Mặc định | Mô tả |
 |----------|------|----------|-------|
-| `aiProvider` | string | `"groq"` | Nhà cung cấp AI để sử dụng (`groq` hoặc `gemini`) |
+| `aiProvider` | string | `"groq"` | Nhà cung cấp AI để sử dụng (`groq`, `gemini`, `openai`, `claude`) |
 | `maxTitleLength` | number | `72` | Độ dài tối đa của tiêu đề commit message |
 | `confirmBeforeCommit` | boolean | `true` | Có hỏi xác nhận trước khi commit hay không |
 | `allowedTypes` | string[] | `["feat","fix","refactor","chore","test"]` | Các loại Conventional Commit được phép |
@@ -225,6 +270,24 @@ Tạo file `.batt/config.json` trong thư mục gốc của dự án để tùy 
 ```json
 {
   "aiProvider": "gemini",
+  "maxTitleLength": 72,
+  "confirmBeforeCommit": true
+}
+```
+
+**Sử dụng OpenAI (ChatGPT):**
+```json
+{
+  "aiProvider": "openai",
+  "maxTitleLength": 72,
+  "confirmBeforeCommit": true
+}
+```
+
+**Sử dụng Claude:**
+```json
+{
+  "aiProvider": "claude",
   "maxTitleLength": 72,
   "confirmBeforeCommit": true
 }
@@ -291,6 +354,20 @@ Nếu API key chưa được thiết lập cho nhà cung cấp đã chọn:
 **Cho Gemini:**
 ```
 ❌ Failed to generate commit message: BATT_GEMINI_API_KEY environment variable is not set. Please set it with: export BATT_GEMINI_API_KEY=your_api_key
+⚠️  You can write your commit message manually.
+ℹ️  Run: git commit
+```
+
+**Cho OpenAI:**
+```
+❌ Failed to generate commit message: BATT_OPENAI_API_KEY or OPENAI_API_KEY environment variable is not set. Please set it with: export BATT_OPENAI_API_KEY=your_api_key
+⚠️  You can write your commit message manually.
+ℹ️  Run: git commit
+```
+
+**Cho Claude:**
+```
+❌ Failed to generate commit message: BATT_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY environment variable is not set. Please set it with: export BATT_ANTHROPIC_API_KEY=your_api_key
 ⚠️  You can write your commit message manually.
 ℹ️  Run: git commit
 ```
@@ -383,25 +460,34 @@ npm test
    npm login
    ```
 
-2. **Kiểm tra package name:**
+2. **Bật Two-Factor Authentication (2FA):**
+   - Truy cập: https://www.npmjs.com/settings/[your-username]/security
+   - Bật 2FA (bắt buộc để publish package)
+
+3. **Kiểm tra package name:**
    ```bash
    npm search battery-generate-commit
    ```
+   Nếu package đã tồn tại, bạn cần đổi tên trong `package.json`
 
-3. **Publish:**
+4. **Publish:**
    ```bash
    npm publish
    ```
 
-4. **Sau khi publish, người dùng có thể cài đặt:**
+5. **Sau khi publish, người dùng có thể cài đặt:**
    ```bash
    npm install -g battery-generate-commit
    ```
 
-5. **Setup API key:**
+6. **Setup API key:**
    ```bash
    batt setup
    ```
+
+**Lưu ý**: Nếu gặp lỗi 403, bạn cần:
+- Bật 2FA trên npm account
+- Hoặc tạo Granular Access Token với quyền "Publish" và "Bypass 2FA"
 
 ### Đóng Góp
 
@@ -423,4 +509,4 @@ MIT
 
 ---
 
-**Lưu ý**: Công cụ này yêu cầu API key từ Groq hoặc Google Gemini (tùy thuộc vào nhà cung cấp bạn chọn). Đảm bảo giữ API key của bạn an toàn và không bao giờ commit nó vào version control.
+**Lưu ý**: Công cụ này yêu cầu API key từ một trong các nhà cung cấp: Groq, Google Gemini, OpenAI, hoặc Anthropic (tùy thuộc vào nhà cung cấp bạn chọn). Đảm bảo giữ API key của bạn an toàn và không bao giờ commit nó vào version control.

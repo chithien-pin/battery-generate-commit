@@ -13,6 +13,14 @@ const GROQ_MODEL = 'llama-3.1-8b-instant';
 const GEMINI_MODEL = 'gemini-3-flash-preview';
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
+// OpenAI (ChatGPT) API constants
+const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
+const OPENAI_MODEL = 'gpt-4o-mini'; // Fast and cost-effective
+
+// Anthropic (Claude) API constants
+const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_MODEL = 'claude-3-5-haiku-20241022'; // Fast and cost-effective
+
 // Rough estimate: ~4 characters per token (conservative estimate)
 const CHARS_PER_TOKEN = 4;
 // Maximum tokens for the entire request (Groq on-demand tier: 6000 TPM)
@@ -395,6 +403,214 @@ async function generateCommitMessageWithGemini(diff, config) {
 }
 
 /**
+ * Generate commit message using OpenAI (ChatGPT) API
+ * @param {string} diff - Git diff content
+ * @param {Object} config - Configuration object
+ * @returns {Promise<string>} Generated commit message
+ */
+async function generateCommitMessageWithOpenAI(diff, config) {
+  const apiKey = process.env.BATT_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+  
+  if (!apiKey) {
+    throw new Error(
+      'BATT_OPENAI_API_KEY or OPENAI_API_KEY environment variable is not set. ' +
+      'Please set it with: export BATT_OPENAI_API_KEY=your_api_key'
+    );
+  }
+  
+  // Check if diff is too large and warn
+  const estimatedTokens = estimateTokens(diff);
+  if (estimatedTokens > MAX_DIFF_TOKENS) {
+    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to ~${MAX_DIFF_TOKENS} tokens to fit API limits...`);
+  }
+  
+  const prompt = buildPrompt(diff);
+  
+  // Final check on total prompt size
+  const totalPromptTokens = estimateTokens(prompt);
+  if (totalPromptTokens > MAX_TOTAL_TOKENS) {
+    console.warn(`⚠️  Warning: Total prompt size (${totalPromptTokens} tokens) may exceed API limits. Further truncation applied.`);
+  }
+  
+  // Set up timeout (30 seconds)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  
+  try {
+    const response = await fetch(OPENAI_API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.7,
+        max_tokens: 100
+      }),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const errorMessage = errorData.error?.message || 'Unknown error';
+      
+      // Handle 413 Payload Too Large specifically
+      if (response.status === 413) {
+        throw new Error(
+          `Diff is too large for the API. The diff contains approximately ${estimateTokens(diff)} tokens, ` +
+          `which exceeds the API limit. Consider committing smaller changes or splitting into multiple commits. ` +
+          `Original error: ${errorMessage}`
+        );
+      }
+      
+      throw new Error(
+        `OpenAI API error: ${response.status} ${response.statusText}. ` +
+        `${errorMessage}`
+      );
+    }
+    
+    const data = await response.json();
+    const rawMessage = data.choices?.[0]?.message?.content || '';
+    
+    if (!rawMessage) {
+      throw new Error('No response from AI model');
+    }
+    
+    const validatedMessage = validateCommitMessage(rawMessage, config);
+    
+    if (!validatedMessage) {
+      throw new Error('AI generated invalid commit message');
+    }
+    
+    return validatedMessage;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout: OpenAI API did not respond within 30 seconds.');
+    }
+    
+    if (error instanceof TypeError && error.message.includes('fetch')) {
+      throw new Error('Network error: Failed to connect to OpenAI API. Check your internet connection.');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Generate commit message using Anthropic (Claude) API
+ * @param {string} diff - Git diff content
+ * @param {Object} config - Configuration object
+ * @returns {Promise<string>} Generated commit message
+ */
+async function generateCommitMessageWithClaude(diff, config) {
+  const apiKey = process.env.BATT_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+  
+  if (!apiKey) {
+    throw new Error(
+      'BATT_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY environment variable is not set. ' +
+      'Please set it with: export BATT_ANTHROPIC_API_KEY=your_api_key'
+    );
+  }
+  
+  // Check if diff is too large and warn
+  const estimatedTokens = estimateTokens(diff);
+  if (estimatedTokens > MAX_DIFF_TOKENS) {
+    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to ~${MAX_DIFF_TOKENS} tokens to fit API limits...`);
+  }
+  
+  const prompt = buildPrompt(diff);
+  
+  // Final check on total prompt size
+  const totalPromptTokens = estimateTokens(prompt);
+  if (totalPromptTokens > MAX_TOTAL_TOKENS) {
+    console.warn(`⚠️  Warning: Total prompt size (${totalPromptTokens} tokens) may exceed API limits. Further truncation applied.`);
+  }
+  
+  // Set up timeout (30 seconds)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  
+  try {
+    const response = await fetch(ANTHROPIC_API_URL, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 100,
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ]
+      }),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const errorMessage = errorData.error?.message || 'Unknown error';
+      
+      // Handle 413 Payload Too Large specifically
+      if (response.status === 413) {
+        throw new Error(
+          `Diff is too large for the API. The diff contains approximately ${estimateTokens(diff)} tokens, ` +
+          `which exceeds the API limit. Consider committing smaller changes or splitting into multiple commits. ` +
+          `Original error: ${errorMessage}`
+        );
+      }
+      
+      throw new Error(
+        `Anthropic API error: ${response.status} ${response.statusText}. ` +
+        `${errorMessage}`
+      );
+    }
+    
+    const data = await response.json();
+    const rawMessage = data.content?.[0]?.text || '';
+    
+    if (!rawMessage) {
+      throw new Error('No response from AI model');
+    }
+    
+    const validatedMessage = validateCommitMessage(rawMessage, config);
+    
+    if (!validatedMessage) {
+      throw new Error('AI generated invalid commit message');
+    }
+    
+    return validatedMessage;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout: Anthropic API did not respond within 30 seconds.');
+    }
+    
+    if (error instanceof TypeError && error.message.includes('fetch')) {
+      throw new Error('Network error: Failed to connect to Anthropic API. Check your internet connection.');
+    }
+    throw error;
+  }
+}
+
+/**
  * Generate commit message using the configured AI provider
  * @param {string} diff - Git diff content
  * @param {Object} config - Configuration object
@@ -408,9 +624,15 @@ export async function generateCommitMessage(diff, config) {
       return await generateCommitMessageWithGroq(diff, config);
     case 'gemini':
       return await generateCommitMessageWithGemini(diff, config);
+    case 'openai':
+    case 'chatgpt':
+      return await generateCommitMessageWithOpenAI(diff, config);
+    case 'claude':
+    case 'anthropic':
+      return await generateCommitMessageWithClaude(diff, config);
     default:
       throw new Error(
-        `Unsupported AI provider: ${provider}. Supported providers are: groq, gemini`
+        `Unsupported AI provider: ${provider}. Supported providers are: groq, gemini, openai, claude`
       );
   }
 }

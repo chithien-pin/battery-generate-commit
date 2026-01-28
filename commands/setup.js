@@ -97,10 +97,12 @@ export async function setup() {
     logger.info('Chọn nhà cung cấp AI bạn muốn sử dụng:');
     logger.plain('  1. Groq (Mặc định - Nhanh và miễn phí)');
     logger.plain('  2. Gemini (Google)');
-    logger.plain('  3. Cả hai');
+    logger.plain('  3. OpenAI (ChatGPT)');
+    logger.plain('  4. Claude (Anthropic)');
+    logger.plain('  5. Tất cả');
     logger.plain('');
     
-    const choice = await askQuestion('Nhập lựa chọn (1/2/3): ');
+    const choice = await askQuestion('Nhập lựa chọn (1/2/3/4/5): ');
     
     const profilePath = getShellProfile();
     const osPlatform = platform();
@@ -109,57 +111,47 @@ export async function setup() {
     logger.info(`Shell profile: ${profilePath}`);
     logger.plain('');
     
-    if (choice === '1' || choice === '3') {
-      logger.info('📝 Thiết lập Groq API Key');
-      logger.info('Lấy API key tại: https://console.groq.com/');
-      logger.plain('');
-      
-      const groqKey = await askQuestion('Nhập Groq API Key: ');
-      
-      if (groqKey) {
-        if (osPlatform === 'win32') {
-          logger.info('Thêm vào PowerShell profile...');
-          addToShellProfile('BATT_GROQ_API_KEY', groqKey, profilePath);
-          logger.info('Chạy: $env:BATT_GROQ_API_KEY="' + groqKey + '"');
-        } else {
-          logger.info('Thêm vào shell profile...');
-          if (addToShellProfile('BATT_GROQ_API_KEY', groqKey, profilePath)) {
-            logger.success('✅ Đã thêm BATT_GROQ_API_KEY vào ' + profilePath);
-            logger.info('Chạy lệnh sau để áp dụng ngay:');
-            logger.plain(`  source ${profilePath}`);
-            logger.plain(`  hoặc: export BATT_GROQ_API_KEY="${groqKey}"`);
+    // Helper function to setup API key
+    async function setupApiKey(choiceNum, envKey, providerName, apiKeyUrl) {
+      if (choice === choiceNum || choice === '5') {
+        logger.info(`📝 Thiết lập ${providerName} API Key`);
+        logger.info(`Lấy API key tại: ${apiKeyUrl}`);
+        logger.plain('');
+        
+        const apiKey = await askQuestion(`Nhập ${providerName} API Key: `);
+        
+        if (apiKey) {
+          if (osPlatform === 'win32') {
+            logger.info('Thêm vào PowerShell profile...');
+            addToShellProfile(envKey, apiKey, profilePath);
+            logger.info(`Chạy: $env:${envKey}="${apiKey}"`);
+          } else {
+            logger.info('Thêm vào shell profile...');
+            if (addToShellProfile(envKey, apiKey, profilePath)) {
+              logger.success(`✅ Đã thêm ${envKey} vào ${profilePath}`);
+              logger.info('Chạy lệnh sau để áp dụng ngay:');
+              logger.plain(`  source ${profilePath}`);
+              logger.plain(`  hoặc: export ${envKey}="${apiKey}"`);
+            }
           }
         }
+        logger.plain('');
       }
-      logger.plain('');
     }
     
-    if (choice === '2' || choice === '3') {
-      logger.info('📝 Thiết lập Gemini API Key');
-      logger.info('Lấy API key tại: https://makersuite.google.com/app/apikey');
-      logger.plain('');
-      
-      const geminiKey = await askQuestion('Nhập Gemini API Key: ');
-      
-      if (geminiKey) {
-        if (osPlatform === 'win32') {
-          logger.info('Thêm vào PowerShell profile...');
-          addToShellProfile('BATT_GEMINI_API_KEY', geminiKey, profilePath);
-          logger.info('Chạy: $env:BATT_GEMINI_API_KEY="' + geminiKey + '"');
-        } else {
-          logger.info('Thêm vào shell profile...');
-          if (addToShellProfile('BATT_GEMINI_API_KEY', geminiKey, profilePath)) {
-            logger.success('✅ Đã thêm BATT_GEMINI_API_KEY vào ' + profilePath);
-            logger.info('Chạy lệnh sau để áp dụng ngay:');
-            logger.plain(`  source ${profilePath}`);
-            logger.plain(`  hoặc: export BATT_GEMINI_API_KEY="${geminiKey}"`);
-          }
-        }
-      }
-      logger.plain('');
-    }
+    // Setup Groq
+    await setupApiKey('1', 'BATT_GROQ_API_KEY', 'Groq', 'https://console.groq.com/');
     
-    if (choice !== '1' && choice !== '2' && choice !== '3') {
+    // Setup Gemini
+    await setupApiKey('2', 'BATT_GEMINI_API_KEY', 'Gemini', 'https://makersuite.google.com/app/apikey');
+    
+    // Setup OpenAI
+    await setupApiKey('3', 'BATT_OPENAI_API_KEY', 'OpenAI (ChatGPT)', 'https://platform.openai.com/api-keys');
+    
+    // Setup Claude
+    await setupApiKey('4', 'BATT_ANTHROPIC_API_KEY', 'Claude (Anthropic)', 'https://console.anthropic.com/');
+    
+    if (!['1', '2', '3', '4', '5'].includes(choice)) {
       logger.error('Lựa chọn không hợp lệ.');
       process.exit(1);
     }
@@ -169,7 +161,10 @@ export async function setup() {
     logger.info('Lưu ý:');
     logger.plain('  - Nếu bạn đã thêm vào shell profile, chạy: source ' + profilePath);
     logger.plain('  - Hoặc mở terminal mới để áp dụng thay đổi');
-    logger.plain('  - Kiểm tra bằng: echo $BATT_GROQ_API_KEY (hoặc $BATT_GEMINI_API_KEY)');
+    logger.plain('  - Kiểm tra bằng: echo $BATT_GROQ_API_KEY (hoặc các biến khác)');
+    logger.plain('');
+    logger.info('Cấu hình provider trong .batt/config.json:');
+    logger.plain('  {"aiProvider": "groq"}  // hoặc "gemini", "openai", "claude"');
     logger.plain('');
     logger.info('Bắt đầu sử dụng:');
     logger.plain('  batt -gen commit');

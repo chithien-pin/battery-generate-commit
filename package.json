@@ -5,10 +5,10 @@
   "type": "module",
   "main": "bin/batt.js",
   "bin": {
-    "batt": "./bin/batt.js"
+    "batt": "bin/batt.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"✓ No tests specified yet\" && exit 0",
     "prepublishOnly": "npm test"
   },
   "keywords": [
@@ -28,7 +28,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chithien-pin/battery-generate-commit"
+    "url": "git+https://github.com/chithien-pin/battery-generate-commit.git"
   },
   "bugs": {
     "url": "https://github.com/chithien-pin/battery-generate-commit/issues"
