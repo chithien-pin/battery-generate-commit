@@ -7,7 +7,7 @@ const __dirname = dirname(__filename);
 
 // Groq API constants
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'compound';
+const GROQ_MODEL = 'groq/compound';
 
 // Gemini API constants
 const GEMINI_MODEL = 'gemini-3-flash-preview';
