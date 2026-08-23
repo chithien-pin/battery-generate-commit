@@ -7,7 +7,16 @@ const __dirname = dirname(__filename);
 
 // Groq API constants
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'groq/compound';
+// Primary model plus fallbacks. Each model has its own rate-limit bucket on Groq,
+// so a 429 on one model can still succeed on the next. See:
+// https://console.groq.com/docs/models and https://console.groq.com/docs/rate-limits
+const GROQ_MODEL_CHAIN = [
+  // Compound has a much smaller per-request body limit than its 70K TPM cap.
+  { id: 'groq/compound', maxTotalTokens: 2800 },
+  // OSS models use a separate rate-limit bucket and handle larger diffs well.
+  { id: 'openai/gpt-oss-20b', maxTotalTokens: 7000, reasoningEffort: 'low', maxCompletionTokens: 200 },
+  { id: 'openai/gpt-oss-120b', maxTotalTokens: 7000, reasoningEffort: 'low', maxCompletionTokens: 200 },
+];
 
 // Gemini API constants
 const GEMINI_MODEL = 'gemini-3-flash-preview';
@@ -23,11 +32,18 @@ const ANTHROPIC_MODEL = 'claude-3-5-haiku-20241022'; // Fast and cost-effective
 
 // Rough estimate: ~4 characters per token (conservative estimate)
 const CHARS_PER_TOKEN = 4;
-// Maximum tokens for the entire request (Groq on-demand tier: 6000 TPM)
-// Reserve ~500 tokens for prompt template and ~100 for response
-const MAX_TOTAL_TOKENS = 5400;
+// Starting budget for a single request. groq/compound allows 70K TPM on the free
+// plan, but the limit varies per organization, so this is only an opening bid:
+// the real limit is read from the API's rate-limit headers and applied on retry.
+const MAX_TOTAL_TOKENS = 60000;
+// Reserve for the prompt template, the provider's system preamble and the reply.
+const PROMPT_OVERHEAD_TOKENS = 500;
 // Maximum tokens for the diff content only
-const MAX_DIFF_TOKENS = 3000;
+const MAX_DIFF_TOKENS = MAX_TOTAL_TOKENS - PROMPT_OVERHEAD_TOKENS;
+// Shrinking the diff below this leaves too little context to describe the change
+const MIN_DIFF_TOKENS = 500;
+// How many times to shrink the diff and retry after a too-large rejection
+const MAX_TOKEN_LIMIT_RETRIES = 4;
 
 /**
  * Load the commit prompt template
@@ -50,17 +66,18 @@ function estimateTokens(text) {
 /**
  * Truncate diff intelligently to fit within token limits
  * @param {string} diff - Full diff content
+ * @param {number} maxDiffTokens - Token budget for the diff
  * @returns {string} Truncated diff
  */
-function truncateDiff(diff) {
+function truncateDiff(diff, maxDiffTokens = MAX_DIFF_TOKENS) {
   const estimatedTokens = estimateTokens(diff);
   
-  if (estimatedTokens <= MAX_DIFF_TOKENS) {
+  if (estimatedTokens <= maxDiffTokens) {
     return diff;
   }
   
   // Calculate max characters to keep (conservative estimate)
-  const maxChars = MAX_DIFF_TOKENS * CHARS_PER_TOKEN;
+  const maxChars = maxDiffTokens * CHARS_PER_TOKEN;
   
   // Try to truncate at a file boundary
   const lines = diff.split('\n');
@@ -109,46 +126,146 @@ function truncateDiff(diff) {
 }
 
 /**
+ * Token budget left for the diff once the template and reply are accounted for
+ * @param {number} maxTotalTokens - Budget for the whole request
+ * @returns {number} Token budget for the diff
+ */
+function diffBudgetFor(maxTotalTokens) {
+  return Math.max(MIN_DIFF_TOKENS, maxTotalTokens - PROMPT_OVERHEAD_TOKENS);
+}
+
+/**
  * Build the prompt with the diff
  * @param {string} diff - Git diff content
+ * @param {number} maxTotalTokens - Budget for the whole request
  * @returns {string} Formatted prompt
  */
-function buildPrompt(diff) {
+function buildPrompt(diff, maxTotalTokens = MAX_TOTAL_TOKENS) {
   const template = loadPromptTemplate();
-  const truncatedDiff = truncateDiff(diff);
-  const prompt = template.replace('{{DIFF}}', truncatedDiff);
+  const truncatedDiff = truncateDiff(diff, diffBudgetFor(maxTotalTokens));
   
-  // Double-check total token count and truncate more aggressively if needed
-  const totalTokens = estimateTokens(prompt);
-  if (totalTokens > MAX_TOTAL_TOKENS) {
-    // Calculate how much space we have for the diff
-    const templateTokens = estimateTokens(template.replace('{{DIFF}}', ''));
-    const reservedTokens = 100; // Reserve for response
-    const availableDiffTokens = MAX_TOTAL_TOKENS - templateTokens - reservedTokens;
-    
-    // Ensure we don't exceed the available tokens
-    const maxDiffChars = Math.floor(availableDiffTokens * CHARS_PER_TOKEN * 0.95); // 95% to be safe
-    
-    // Truncate more aggressively
-    const lines = truncatedDiff.split('\n');
-    let finalDiff = [];
-    let currentLength = 0;
-    
-    for (const line of lines) {
-      const lineLength = line.length + 1;
-      if (currentLength + lineLength <= maxDiffChars) {
-        finalDiff.push(line);
-        currentLength += lineLength;
-      } else {
-        finalDiff.push('\n... (further truncated to fit API limits)');
-        break;
-      }
-    }
-    
-    return template.replace('{{DIFF}}', finalDiff.join('\n'));
+  return template.replace('{{DIFF}}', truncatedDiff);
+}
+
+/**
+ * Read the API's token limit from rate-limit headers, falling back to the
+ * "Limit N" figure that Groq includes in too-large error messages.
+ * @param {Response} response - Rejected fetch response
+ * @param {Object} errorData - Parsed error body
+ * @returns {number|null} Token limit, or null if the API did not report one
+ */
+function parseTokenLimit(response, errorData) {
+  const header = Number(response.headers.get('x-ratelimit-limit-tokens'));
+  if (Number.isFinite(header) && header > 0) {
+    return header;
   }
   
-  return prompt;
+  const match = /limit[:\s]+([\d,]+)/i.exec(errorData?.error?.message || '');
+  if (match) {
+    const reported = Number(match[1].replace(/,/g, ''));
+    if (Number.isFinite(reported) && reported > 0) {
+      return reported;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Whether Groq rejected the request because of rate limits (RPM/TPM/RPD).
+ * @param {number} status - HTTP status code
+ * @param {Object} errorData - Parsed error body
+ * @returns {boolean}
+ */
+function isGroqRateLimitError(status, errorData) {
+  if (status === 429) {
+    return true;
+  }
+  
+  const code = (errorData?.error?.code || '').toLowerCase();
+  return code.includes('rate_limit') || code.includes('rate limit');
+}
+
+/**
+ * Parse the commit message text from a Groq chat completion response.
+ * @param {Object} data - Parsed response body
+ * @returns {string}
+ */
+function parseGroqMessage(data) {
+  const message = data.choices?.[0]?.message;
+  if (!message) {
+    return '';
+  }
+  
+  const content = (message.content || '').trim();
+  if (content) {
+    return content;
+  }
+  
+  // Reasoning models may spend the token budget on `reasoning` and leave `content` empty.
+  const reasoning = (message.reasoning || '').trim();
+  if (!reasoning) {
+    return '';
+  }
+  
+  const commitPattern = /(?:feat|fix|refactor|chore|test)(?:\([^)]+\))?:\s*[^\n."']+/i;
+  const lines = reasoning.split('\n').map((line) => line.trim()).filter(Boolean);
+  
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].replace(/^["']|["']$/g, '');
+    if (commitPattern.test(line)) {
+      return line.match(commitPattern)[0].trim();
+    }
+  }
+  
+  const match = reasoning.match(commitPattern);
+  return match ? match[0].trim() : '';
+}
+
+/**
+ * Build the JSON body for a Groq chat completion request.
+ * @param {Object} modelConfig - Entry from GROQ_MODEL_CHAIN
+ * @param {string} prompt - Fully rendered prompt
+ * @returns {Object}
+ */
+function buildGroqRequestBody(modelConfig, prompt) {
+  const body = {
+    model: modelConfig.id,
+    messages: [
+      {
+        role: 'user',
+        content: prompt
+      }
+    ],
+    temperature: 0.7,
+    max_tokens: modelConfig.maxCompletionTokens || 100
+  };
+  
+  if (modelConfig.reasoningEffort) {
+    body.reasoning_effort = modelConfig.reasoningEffort;
+  }
+  
+  return body;
+}
+
+/**
+ * Pick the next token budget after a too-large rejection.
+ * @param {number} budget - Current budget
+ * @param {number} totalPromptTokens - Estimated tokens in the rejected prompt
+ * @param {Response} response - Rejected fetch response
+ * @param {Object} errorData - Parsed error body
+ * @returns {number}
+ */
+function nextBudgetAfterTooLarge(budget, totalPromptTokens, response, errorData) {
+  const apiLimit = parseTokenLimit(response, errorData);
+  
+  // x-ratelimit-limit-tokens is the org TPM cap, not the per-request body limit.
+  // Only trust it when the rejected prompt actually exceeded that cap.
+  if (apiLimit && apiLimit < totalPromptTokens) {
+    return Math.floor(apiLimit * 0.9);
+  }
+  
+  return Math.floor(budget / 2);
 }
 
 /**
@@ -206,92 +323,147 @@ async function generateCommitMessageWithGroq(diff, config) {
     );
   }
   
-  // Check if diff is too large and warn
   const estimatedTokens = estimateTokens(diff);
-  if (estimatedTokens > MAX_DIFF_TOKENS) {
-    console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to ~${MAX_DIFF_TOKENS} tokens to fit API limits...`);
+  const rateLimitErrors = [];
+  let modelStartIndex = 0;
+  const primaryDiffBudget = diffBudgetFor(GROQ_MODEL_CHAIN[0].maxTotalTokens);
+  
+  if (estimatedTokens > primaryDiffBudget && GROQ_MODEL_CHAIN.length > 1) {
+    console.warn(
+      `⚠️  Diff is large (estimated ${estimatedTokens} tokens). ` +
+      `Skipping ${GROQ_MODEL_CHAIN[0].id} and using ${GROQ_MODEL_CHAIN[1].id}...`
+    );
+    modelStartIndex = 1;
   }
   
-  const prompt = buildPrompt(diff);
-  
-  // Final check on total prompt size
-  const totalPromptTokens = estimateTokens(prompt);
-  if (totalPromptTokens > MAX_TOTAL_TOKENS) {
-    console.warn(`⚠️  Warning: Total prompt size (${totalPromptTokens} tokens) may exceed API limits. Further truncation applied.`);
-  }
-  
-  // Set up timeout (30 seconds)
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
-  
-  try {
-    const response = await fetch(GROQ_API_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 100
-      }),
-      signal: controller.signal
-    });
+  for (let modelIndex = modelStartIndex; modelIndex < GROQ_MODEL_CHAIN.length; modelIndex++) {
+    const modelConfig = GROQ_MODEL_CHAIN[modelIndex];
+    const { id: model, maxTotalTokens } = modelConfig;
+    let budget = maxTotalTokens;
     
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const errorMessage = errorData.error?.message || 'Unknown error';
+    for (let attempt = 0; ; attempt++) {
+      const diffBudget = diffBudgetFor(budget);
+      if (estimatedTokens > diffBudget) {
+        console.warn(`⚠️  Diff is large (estimated ${estimatedTokens} tokens). Truncating to ~${diffBudget} tokens to fit API limits...`);
+      }
       
-      // Handle 413 Payload Too Large specifically
-      if (response.status === 413) {
+      const prompt = buildPrompt(diff, budget);
+      const totalPromptTokens = estimateTokens(prompt);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      
+      let response;
+      try {
+        response = await fetch(GROQ_API_URL, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(buildGroqRequestBody(modelConfig, prompt)),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          throw new Error('Request timeout: Groq API did not respond within 30 seconds.');
+        }
+        
+        if (error instanceof TypeError && error.message.includes('fetch')) {
+          throw new Error('Network error: Failed to connect to Groq API. Check your internet connection.');
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.error?.message || 'Unknown error';
+        
+        if (isGroqRateLimitError(response.status, errorData)) {
+          rateLimitErrors.push(`${model}: ${errorMessage}`);
+          const nextModel = GROQ_MODEL_CHAIN[modelIndex + 1];
+          
+          if (nextModel) {
+            console.warn(`⚠️  ${model} is rate limited. Trying fallback model ${nextModel.id}...`);
+            break;
+          }
+          
+          throw new Error(
+            `All Groq models are rate limited. ` +
+            `Wait a minute and try again, or switch provider in .batt/config.json. ` +
+            `Details: ${rateLimitErrors.join(' | ')}`
+          );
+        }
+        
+        if (response.status === 413) {
+          const apiLimit = parseTokenLimit(response, errorData);
+          const nextBudget = nextBudgetAfterTooLarge(budget, totalPromptTokens, response, errorData);
+          const canRetry = attempt < MAX_TOKEN_LIMIT_RETRIES &&
+                           nextBudget < budget &&
+                           nextBudget > PROMPT_OVERHEAD_TOKENS + MIN_DIFF_TOKENS;
+          
+          if (canRetry) {
+            console.warn(`⚠️  ${model} rejected ${totalPromptTokens} tokens${apiLimit ? ` (reported limit ${apiLimit})` : ''}. Retrying with ~${nextBudget} tokens...`);
+            budget = nextBudget;
+            continue;
+          }
+          
+          const nextModel = GROQ_MODEL_CHAIN[modelIndex + 1];
+          if (nextModel) {
+            console.warn(`⚠️  ${model} cannot fit this diff. Trying fallback model ${nextModel.id}...`);
+            break;
+          }
+          
+          throw new Error(
+            `Diff is too large for the API. The request sent approximately ${totalPromptTokens} tokens ` +
+            `(diff alone: ${estimatedTokens})${apiLimit ? `, but the limit is ${apiLimit}` : ''}. ` +
+            `Consider committing smaller changes or splitting into multiple commits. ` +
+            `Original error: ${errorMessage}`
+          );
+        }
+        
+        const nextModel = GROQ_MODEL_CHAIN[modelIndex + 1];
+        if (nextModel && (response.status >= 500 || response.status === 404)) {
+          console.warn(`⚠️  ${model} failed (${response.status}). Trying fallback model ${nextModel.id}...`);
+          break;
+        }
+        
         throw new Error(
-          `Diff is too large for the API. The diff contains approximately ${estimateTokens(diff)} tokens, ` +
-          `which exceeds the API limit. Consider committing smaller changes or splitting into multiple commits. ` +
-          `Original error: ${errorMessage}`
+          `Groq API error: ${response.status} ${response.statusText}. ` +
+          `${errorMessage}`
         );
       }
       
-      throw new Error(
-        `Groq API error: ${response.status} ${response.statusText}. ` +
-        `${errorMessage}`
-      );
+      const data = await response.json();
+      const rawMessage = parseGroqMessage(data);
+      
+      if (!rawMessage) {
+        const nextModel = GROQ_MODEL_CHAIN[modelIndex + 1];
+        if (nextModel) {
+          console.warn(`⚠️  ${model} returned an empty response. Trying fallback model ${nextModel.id}...`);
+          break;
+        }
+        
+        throw new Error('No response from AI model');
+      }
+      
+      const validatedMessage = validateCommitMessage(rawMessage, config);
+      
+      if (!validatedMessage) {
+        throw new Error('AI generated invalid commit message');
+      }
+      
+      if (modelIndex > 0) {
+        console.warn(`ℹ️  Generated using fallback model ${model}.`);
+      }
+      
+      return validatedMessage;
     }
-    
-    const data = await response.json();
-    const rawMessage = data.choices?.[0]?.message?.content || '';
-    
-    if (!rawMessage) {
-      throw new Error('No response from AI model');
-    }
-    
-    const validatedMessage = validateCommitMessage(rawMessage, config);
-    
-    if (!validatedMessage) {
-      throw new Error('AI generated invalid commit message');
-    }
-    
-    return validatedMessage;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    
-    if (error.name === 'AbortError') {
-      throw new Error('Request timeout: Groq API did not respond within 30 seconds.');
-    }
-    
-    if (error instanceof TypeError && error.message.includes('fetch')) {
-      throw new Error('Network error: Failed to connect to Groq API. Check your internet connection.');
-    }
-    throw error;
   }
+  
+  throw new Error('Failed to generate commit message with Groq.');
 }
 
 /**
@@ -362,8 +534,9 @@ async function generateCommitMessageWithGemini(diff, config) {
       // Handle 413 Payload Too Large specifically
       if (response.status === 413) {
         throw new Error(
-          `Diff is too large for the API. The diff contains approximately ${estimateTokens(diff)} tokens, ` +
-          `which exceeds the API limit. Consider committing smaller changes or splitting into multiple commits. ` +
+          `Diff is too large for the API. The request sent approximately ${totalPromptTokens} tokens ` +
+          `(diff alone: ${estimatedTokens}), which exceeds the API limit. ` +
+          `Consider committing smaller changes or splitting into multiple commits. ` +
           `Original error: ${errorMessage}`
         );
       }
@@ -466,8 +639,9 @@ async function generateCommitMessageWithOpenAI(diff, config) {
       // Handle 413 Payload Too Large specifically
       if (response.status === 413) {
         throw new Error(
-          `Diff is too large for the API. The diff contains approximately ${estimateTokens(diff)} tokens, ` +
-          `which exceeds the API limit. Consider committing smaller changes or splitting into multiple commits. ` +
+          `Diff is too large for the API. The request sent approximately ${totalPromptTokens} tokens ` +
+          `(diff alone: ${estimatedTokens}), which exceeds the API limit. ` +
+          `Consider committing smaller changes or splitting into multiple commits. ` +
           `Original error: ${errorMessage}`
         );
       }
@@ -570,8 +744,9 @@ async function generateCommitMessageWithClaude(diff, config) {
       // Handle 413 Payload Too Large specifically
       if (response.status === 413) {
         throw new Error(
-          `Diff is too large for the API. The diff contains approximately ${estimateTokens(diff)} tokens, ` +
-          `which exceeds the API limit. Consider committing smaller changes or splitting into multiple commits. ` +
+          `Diff is too large for the API. The request sent approximately ${totalPromptTokens} tokens ` +
+          `(diff alone: ${estimatedTokens}), which exceeds the API limit. ` +
+          `Consider committing smaller changes or splitting into multiple commits. ` +
           `Original error: ${errorMessage}`
         );
       }
