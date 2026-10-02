@@ -13,9 +13,12 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL_CHAIN = [
   // Compound has a much smaller per-request body limit than its 70K TPM cap.
   { id: 'groq/compound', maxTotalTokens: 2800 },
-  // OSS models use a separate rate-limit bucket and handle larger diffs well.
-  { id: 'openai/gpt-oss-20b', maxTotalTokens: 7000, reasoningEffort: 'low', maxCompletionTokens: 200 },
-  { id: 'openai/gpt-oss-120b', maxTotalTokens: 7000, reasoningEffort: 'low', maxCompletionTokens: 200 },
+  // Free-tier OSS/Qwen models share an ~8K TPM per-request cap. Stay under it
+  // with a conservative estimate (code diffs tokenize denser than prose).
+  { id: 'openai/gpt-oss-20b', maxTotalTokens: 5500, reasoningEffort: 'low', maxCompletionTokens: 200 },
+  { id: 'openai/gpt-oss-120b', maxTotalTokens: 5500, reasoningEffort: 'low', maxCompletionTokens: 200 },
+  { id: 'qwen/qwen3.6-27b', maxTotalTokens: 5500 },
+  { id: 'qwen/qwen3.8-27b', maxTotalTokens: 5500 },
 ];
 
 // Gemini API constants
@@ -30,8 +33,8 @@ const OPENAI_MODEL = 'gpt-4o-mini'; // Fast and cost-effective
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_MODEL = 'claude-3-5-haiku-20241022'; // Fast and cost-effective
 
-// Rough estimate: ~4 characters per token (conservative estimate)
-const CHARS_PER_TOKEN = 4;
+// Rough estimate: ~3 characters per token for code diffs (code is denser than prose)
+const CHARS_PER_TOKEN = 3;
 // Starting budget for a single request. groq/compound allows 70K TPM on the free
 // plan, but the limit varies per organization, so this is only an opening bid:
 // the real limit is read from the API's rate-limit headers and applied on retry.
@@ -172,12 +175,44 @@ function parseTokenLimit(response, errorData) {
 }
 
 /**
+ * Whether Groq rejected the request because this single prompt exceeds the
+ * model's per-request TPM cap ("Request too large ... Limit N, Requested M").
+ * Groq returns this as HTTP 429, so it must be handled before generic rate limits.
+ * @param {Object} errorData - Parsed error body
+ * @returns {boolean}
+ */
+function isGroqRequestTooLargeError(errorData) {
+  const message = (errorData?.error?.message || '').toLowerCase();
+  return message.includes('request too large') ||
+         (message.includes('requested') && message.includes('limit') && message.includes('tpm'));
+}
+
+/**
+ * Tokens the API says this request actually used.
+ * @param {Object} errorData - Parsed error body
+ * @returns {number|null}
+ */
+function parseRequestedTokens(errorData) {
+  const match = /Requested\s+([\d,]+)/i.exec(errorData?.error?.message || '');
+  if (!match) {
+    return null;
+  }
+  
+  const requested = Number(match[1].replace(/,/g, ''));
+  return Number.isFinite(requested) && requested > 0 ? requested : null;
+}
+
+/**
  * Whether Groq rejected the request because of rate limits (RPM/TPM/RPD).
  * @param {number} status - HTTP status code
  * @param {Object} errorData - Parsed error body
  * @returns {boolean}
  */
 function isGroqRateLimitError(status, errorData) {
+  if (isGroqRequestTooLargeError(errorData)) {
+    return false;
+  }
+  
   if (status === 429) {
     return true;
   }
@@ -258,11 +293,22 @@ function buildGroqRequestBody(modelConfig, prompt) {
  */
 function nextBudgetAfterTooLarge(budget, totalPromptTokens, response, errorData) {
   const apiLimit = parseTokenLimit(response, errorData);
+  const requested = parseRequestedTokens(errorData);
+  
+  // Prefer the Limit/Requested figures from Groq's "Request too large" message.
+  // Scale our estimated budget so the next attempt lands under ~75% of the real cap.
+  if (apiLimit && requested && requested > 0) {
+    const scale = totalPromptTokens / requested;
+    return Math.max(
+      MIN_DIFF_TOKENS + PROMPT_OVERHEAD_TOKENS,
+      Math.min(budget - 1, Math.floor(apiLimit * 0.75 * scale))
+    );
+  }
   
   // x-ratelimit-limit-tokens is the org TPM cap, not the per-request body limit.
   // Only trust it when the rejected prompt actually exceeded that cap.
   if (apiLimit && apiLimit < totalPromptTokens) {
-    return Math.floor(apiLimit * 0.9);
+    return Math.floor(apiLimit * 0.75);
   }
   
   return Math.floor(budget / 2);
@@ -381,23 +427,9 @@ async function generateCommitMessageWithGroq(diff, config) {
         const errorData = await response.json().catch(() => ({}));
         const errorMessage = errorData.error?.message || 'Unknown error';
         
-        if (isGroqRateLimitError(response.status, errorData)) {
-          rateLimitErrors.push(`${model}: ${errorMessage}`);
-          const nextModel = GROQ_MODEL_CHAIN[modelIndex + 1];
-          
-          if (nextModel) {
-            console.warn(`⚠️  ${model} is rate limited. Trying fallback model ${nextModel.id}...`);
-            break;
-          }
-          
-          throw new Error(
-            `All Groq models are rate limited. ` +
-            `Wait a minute and try again, or switch provider in .batt/config.json. ` +
-            `Details: ${rateLimitErrors.join(' | ')}`
-          );
-        }
-        
-        if (response.status === 413) {
+        // "Request too large" arrives as 429 but is a size problem, not RPM.
+        // Shrink the prompt against the Limit/Requested figures and retry.
+        if (response.status === 413 || isGroqRequestTooLargeError(errorData)) {
           const apiLimit = parseTokenLimit(response, errorData);
           const nextBudget = nextBudgetAfterTooLarge(budget, totalPromptTokens, response, errorData);
           const canRetry = attempt < MAX_TOKEN_LIMIT_RETRIES &&
@@ -405,7 +437,7 @@ async function generateCommitMessageWithGroq(diff, config) {
                            nextBudget > PROMPT_OVERHEAD_TOKENS + MIN_DIFF_TOKENS;
           
           if (canRetry) {
-            console.warn(`⚠️  ${model} rejected ${totalPromptTokens} tokens${apiLimit ? ` (reported limit ${apiLimit})` : ''}. Retrying with ~${nextBudget} tokens...`);
+            console.warn(`⚠️  ${model} rejected ${totalPromptTokens} tokens${apiLimit ? ` (limit ${apiLimit})` : ''}. Retrying with ~${nextBudget} tokens...`);
             budget = nextBudget;
             continue;
           }
@@ -421,6 +453,22 @@ async function generateCommitMessageWithGroq(diff, config) {
             `(diff alone: ${estimatedTokens})${apiLimit ? `, but the limit is ${apiLimit}` : ''}. ` +
             `Consider committing smaller changes or splitting into multiple commits. ` +
             `Original error: ${errorMessage}`
+          );
+        }
+        
+        if (isGroqRateLimitError(response.status, errorData)) {
+          rateLimitErrors.push(`${model}: ${errorMessage}`);
+          const nextModel = GROQ_MODEL_CHAIN[modelIndex + 1];
+          
+          if (nextModel) {
+            console.warn(`⚠️  ${model} is rate limited. Trying fallback model ${nextModel.id}...`);
+            break;
+          }
+          
+          throw new Error(
+            `All Groq models are rate limited. ` +
+            `Wait a minute and try again, or switch provider in .batt/config.json. ` +
+            `Details: ${rateLimitErrors.join(' | ')}`
           );
         }
         
@@ -786,6 +834,45 @@ async function generateCommitMessageWithClaude(diff, config) {
 }
 
 /**
+ * Providers that can be tried when the configured one fails, if an API key exists.
+ * @param {string} preferred - Configured provider
+ * @returns {Array<{name: string, run: Function}>}
+ */
+function getProviderFallbackChain(preferred, diff, config) {
+  const providers = [
+    {
+      name: 'groq',
+      hasKey: () => Boolean(process.env.BATT_GROQ_API_KEY),
+      run: () => generateCommitMessageWithGroq(diff, config)
+    },
+    {
+      name: 'gemini',
+      hasKey: () => Boolean(process.env.BATT_GEMINI_API_KEY || process.env.GEMINI_API_KEY),
+      run: () => generateCommitMessageWithGemini(diff, config)
+    },
+    {
+      name: 'openai',
+      hasKey: () => Boolean(process.env.BATT_OPENAI_API_KEY || process.env.OPENAI_API_KEY),
+      run: () => generateCommitMessageWithOpenAI(diff, config)
+    },
+    {
+      name: 'claude',
+      hasKey: () => Boolean(process.env.BATT_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY),
+      run: () => generateCommitMessageWithClaude(diff, config)
+    }
+  ];
+  
+  const preferredName = preferred === 'chatgpt' ? 'openai'
+    : preferred === 'anthropic' ? 'claude'
+    : preferred;
+  
+  const preferredProvider = providers.find((p) => p.name === preferredName);
+  const others = providers.filter((p) => p.name !== preferredName && p.hasKey());
+  
+  return [preferredProvider, ...others].filter(Boolean);
+}
+
+/**
  * Generate commit message using the configured AI provider
  * @param {string} diff - Git diff content
  * @param {Object} config - Configuration object
@@ -793,21 +880,39 @@ async function generateCommitMessageWithClaude(diff, config) {
  */
 export async function generateCommitMessage(diff, config) {
   const provider = config.aiProvider?.toLowerCase() || 'groq';
+  const chain = getProviderFallbackChain(provider, diff, config);
   
-  switch (provider) {
-    case 'groq':
-      return await generateCommitMessageWithGroq(diff, config);
-    case 'gemini':
-      return await generateCommitMessageWithGemini(diff, config);
-    case 'openai':
-    case 'chatgpt':
-      return await generateCommitMessageWithOpenAI(diff, config);
-    case 'claude':
-    case 'anthropic':
-      return await generateCommitMessageWithClaude(diff, config);
-    default:
+  if (chain.length === 0) {
+    throw new Error(
+      `Unsupported AI provider: ${provider}. Supported providers are: groq, gemini, openai, claude`
+    );
+  }
+  
+  const errors = [];
+  
+  for (let i = 0; i < chain.length; i++) {
+    const current = chain[i];
+    
+    try {
+      const message = await current.run();
+      if (i > 0) {
+        console.warn(`ℹ️  Generated using fallback provider ${current.name}.`);
+      }
+      return message;
+    } catch (error) {
+      errors.push(`${current.name}: ${error.message}`);
+      
+      const next = chain[i + 1];
+      if (next) {
+        console.warn(`⚠️  ${current.name} failed. Trying fallback provider ${next.name}...`);
+        continue;
+      }
+      
       throw new Error(
-        `Unsupported AI provider: ${provider}. Supported providers are: groq, gemini, openai, claude`
+        errors.length === 1
+          ? error.message
+          : `All configured AI providers failed. Details: ${errors.join(' | ')}`
       );
+    }
   }
 }
